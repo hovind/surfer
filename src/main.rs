@@ -277,7 +277,7 @@ pub struct DisplayedSignal {
 
 pub struct VcdData {
     inner: VCD,
-    filename: String,
+    source: WaveSource,
     active_scope: Option<ScopeIdx>,
     /// Root signals to display
     signals: Vec<DisplayedSignal>,
@@ -345,9 +345,10 @@ pub enum Message {
         end: f64,
     },
     CursorSet(BigInt),
+    ReloadVcd,
     LoadVcd(Utf8PathBuf),
     LoadVcdFromUrl(String),
-    VcdLoaded(WaveSource, Box<VCD>),
+    VcdLoaded(WaveSource, Box<VCD>, bool),
     Error(color_eyre::eyre::Error),
     TranslatorLoaded(#[derivative(Debug = "ignore")] Box<dyn Translator + Send>),
     /// Take note that the specified translator errored on a `translates` call on the
@@ -518,7 +519,7 @@ impl State {
 
         match args.vcd {
             Some(WaveSource::Url(url)) => result.load_vcd_from_url(url),
-            Some(WaveSource::File(file)) => result.load_vcd_from_file(file).unwrap(),
+            Some(WaveSource::File(file)) => result.load_vcd_from_file(file, false).unwrap(),
             Some(WaveSource::DragAndDrop(_)) => {
                 error!("Attempted to load from drag and drop at startup (how?)")
             }
@@ -528,7 +529,7 @@ impl State {
         Ok(result)
     }
 
-    fn load_vcd_from_file(&mut self, vcd_filename: Utf8PathBuf) -> Result<()> {
+    fn load_vcd_from_file(&mut self, vcd_filename: Utf8PathBuf, reload: bool) -> Result<()> {
         // We'll open the file to check if it exists here to panic the main thread if not.
         // Then we pass the file into the thread for parsing
         info!("Load VCD: {vcd_filename}");
@@ -540,7 +541,7 @@ impl State {
             .map_err(|e| info!("Failed to get vcd file metadata {e}"))
             .ok();
 
-        self.load_vcd(WaveSource::File(vcd_filename), file, total_bytes);
+        self.load_vcd(WaveSource::File(vcd_filename), file, total_bytes, reload);
 
         Ok(())
     }
@@ -559,6 +560,7 @@ impl State {
             WaveSource::DragAndDrop(filename),
             VecDeque::from_iter(bytes.into_iter().cloned()),
             Some(total_bytes as u64),
+            false,
         );
         Ok(())
     }
@@ -594,6 +596,7 @@ impl State {
         source: WaveSource,
         reader: impl Read + Send + 'static,
         total_bytes: Option<u64>,
+        reload: bool,
     ) {
         // Progress tracking in bytes
         let progress_bytes = Arc::new(AtomicU64::new(0));
@@ -614,7 +617,7 @@ impl State {
 
             match result {
                 Ok(vcd) => sender
-                    .send(Message::VcdLoaded(source, Box::new(vcd)))
+                    .send(Message::VcdLoaded(source, Box::new(vcd), reload))
                     .unwrap(),
                 Err(e) => sender.send(Message::Error(e)).unwrap(),
             }
@@ -864,17 +867,28 @@ impl State {
                 }
             }
             Message::LoadVcd(filename) => {
-                self.load_vcd_from_file(filename).ok();
+                self.load_vcd_from_file(filename, false).ok();
             }
             Message::LoadVcdFromUrl(url) => {
                 self.load_vcd_from_url(url);
+            }
+            Message::ReloadVcd => {
+                if let Some(vcd) = &self.vcd {
+                    if let WaveSource::File(file) = &vcd.source {
+                        self.load_vcd_from_file(file.clone(), true).ok();
+                    } else {
+                        info!("VCD must be loaded from file");
+                    }
+                } else {
+                    info!("VCD must be loaded");
+                }
             }
             Message::FileDropped(dropped_file) => {
                 self.load_vcd_from_dropped(dropped_file)
                     .map_err(|e| error!("{e:#?}"))
                     .ok();
             }
-            Message::VcdLoaded(filename, new_vcd_data) => {
+            Message::VcdLoaded(source, new_vcd_data, reload) => {
                 info!("VCD file loaded");
                 let num_timestamps = new_vcd_data
                     .max_timestamp()
@@ -884,7 +898,7 @@ impl State {
 
                 let mut new_vcd = VcdData {
                     inner: *new_vcd_data,
-                    filename: filename.to_string(),
+                    source: source,
                     active_scope: None,
                     signals: vec![],
                     signals_to_ids: HashMap::new(),
@@ -898,9 +912,16 @@ impl State {
                     default_signal_name_type: self.config.default_signal_name_type,
                     scroll: 0,
                 };
+                // Must clone timescale before consuming new_vcd
                 new_vcd.initialize_signal_scope_maps();
 
-                // Must clone timescale before consuming new_vcd
+                if let Some(old_vcd) = &self.vcd {
+                    if reload {
+                        for signal in &old_vcd.signals {
+                            new_vcd.add_signal(&self.translators, signal.idx)
+                        }
+                    }
+                }
                 self.wanted_timescale = new_vcd.inner.metadata.timescale.1;
                 self.vcd = Some(new_vcd);
                 self.vcd_progress = None;
@@ -930,7 +951,7 @@ impl State {
             }
             Message::FileDownloaded(url, bytes) => {
                 let size = bytes.len() as u64;
-                self.load_vcd(WaveSource::Url(url), bytes.reader(), Some(size))
+                self.load_vcd(WaveSource::Url(url), bytes.reader(), Some(size), false)
             }
             Message::ReloadConfig => {
                 // FIXME think about a structured way to collect errors

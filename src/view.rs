@@ -74,7 +74,7 @@ impl State {
                     ui.with_layout(Layout::left_to_right(Align::RIGHT), |ui| {
                         ui.add_space(10.0);
                         if self.show_wave_source {
-                            ui.label(&vcd.filename);
+                            ui.label(&vcd.source.to_string());
                             if let Some(datetime) = vcd.inner.metadata.date {
                                 ui.add_space(10.0);
                                 ui.label(format!("Generated: {datetime}"));
@@ -385,6 +385,7 @@ impl State {
                     pressed,
                     modifiers,
                 } => match (key, pressed, self.command_prompt.visible) {
+                    (Key::R, true, false) => msgs.push(Message::ReloadVcd),
                     (Key::Num0, true, false) => msgs.push(Message::AddCount('0')),
                     (Key::Num1, true, false) => msgs.push(Message::AddCount('1')),
                     (Key::Num2, true, false) => msgs.push(Message::AddCount('2')),
@@ -964,7 +965,7 @@ impl State {
         ui.separator();
         ui.add_space(20.0);
         if let Some(vcd) = &self.vcd {
-            ui.label(RichText::new(format!("Filename: {}", vcd.filename)).monospace());
+            ui.label(RichText::new(format!("Filename: {}", vcd.source.to_string())).monospace());
         }
 
         #[cfg(target_arch = "wasm32")]
